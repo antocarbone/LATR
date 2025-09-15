@@ -29,13 +29,13 @@ import torch.optim
 from torch.optim import lr_scheduler
 import os.path as ops
 
-
 from scipy.interpolate import interp1d
 from scipy.special import softmax
 import logging, datetime
 
 from experiments.gpu_utils import is_main_process
-from mmdet.utils import get_root_logger as get_mmdet_root_logger
+#from mmdet.utils import get_root_logger as get_mmdet_root_logger #ORA SOSTITUITO DA mmengine.logging
+from mmengine.logging import MMLogger
 
 
 def create_logger(args):
@@ -57,8 +57,13 @@ def create_logger(args):
                         filemode= 'w'
                         )
 
-    # logger = logging.getLogger(filename)
-    logger = get_mmdet_root_logger(log_file=filename, log_level=logging.INFO)
+    #logger = logging.getLogger(filename)
+    #logger = get_mmdet_root_logger(log_file=filename, log_level=logging.INFO) #VERSIONE ORIGINALE PRIMA DI MMENGINE
+    logger = MMLogger.get_instance(
+        name='mmdet',
+        log_file=filename,
+        log_level=logging.INFO
+    )
 
     return logger
 

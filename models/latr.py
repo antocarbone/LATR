@@ -2,18 +2,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from utils.utils import *
-from mmdet3d.models import build_backbone, build_neck
+#from mmdet3d.models import build_backbone, build_neck
 from .latr_head import LATRHead
-from mmcv.utils import Config
+#from mmcv.utils import Config
+from mmengine.config import Config
 from .ms2one import build_ms2one
 from .utils import deepFeatureExtractor_EfficientNet
 
-from mmdet.models.builder import BACKBONES
-
+from mmengine.registry import MODELS
+from mmdet.registry import MODELS as MMDET_MODELS
 
 # overall network
+@MODELS.register_module()
 class LATR(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args, data_preprocessor = None, backbone=None, decode_head=None, test_cfg=None):
         super().__init__()
         self.no_cuda = args.no_cuda
         self.batch_size = args.batch_size
@@ -25,10 +27,21 @@ class LATR(nn.Module):
         num_query = args.latr_cfg.num_query
         num_group = args.latr_cfg.num_group
         sparse_num_group = args.latr_cfg.sparse_num_group
+        
+        args.anchor_y_steps = np.linspace(
+            args.anchor_y_steps['start'],
+            args.anchor_y_steps['stop'],
+            args.anchor_y_steps['num']
+        )
+        args.anchor_y_steps_dense = np.linspace(
+            args.anchor_y_steps_dense['start'],
+            args.anchor_y_steps_dense['stop'],
+            args.anchor_y_steps_dense['num']
+        )
 
-        self.encoder = build_backbone(args.latr_cfg.encoder)
+        self.encoder = MMDET_MODELS.build(args.latr_cfg.encoder)
         if getattr(args.latr_cfg, 'neck', None):
-            self.neck = build_neck(args.latr_cfg.neck)
+            self.neck = MMDET_MODELS.build(args.latr_cfg.neck)
         else:
             self.neck = None
         self.encoder.init_weights()
@@ -43,7 +56,7 @@ class LATR(nn.Module):
             in_channels=_dim_,
             kernel_dim=_dim_,
             position_range=args.position_range,
-            top_view_region=args.top_view_region,
+            top_view_region=np.array(args.top_view_region),
             positional_encoding=dict(
                 type='SinePositionalEncoding',
                 num_feats=_dim_// 2, normalize=True),
@@ -56,23 +69,14 @@ class LATR(nn.Module):
             **args.latr_cfg.get('head', {}),
             trans_params=args.latr_cfg.get('trans_params', {})
         )
-
-    def forward(self, image, _M_inv=None, is_training=True, extra_dict=None):
+        
+    #=== original forward function ===#
+    def forward(self, image, lidar2img, pad_shape):
         out_featList = self.encoder(image)
         neck_out = self.neck(out_featList)
         neck_out = self.ms2one(neck_out)
 
-        output = self.head(
-            dict(
-                x=neck_out,
-                lane_idx=extra_dict['seg_idx_label'],
-                seg=extra_dict['seg_label'],
-                lidar2img=extra_dict['lidar2img'],
-                pad_shape=extra_dict['pad_shape'],
-                ground_lanes=extra_dict['ground_lanes'] if is_training else None,
-                ground_lanes_dense=extra_dict['ground_lanes_dense'] if is_training else None,
-                image=image,
-            ),
-            is_training=is_training,
-        )
-        return output
+        output = self.head(neck_out, image, lidar2img, pad_shape)
+        all_cls_scores = output['all_cls_scores']
+        all_line_preds = output['all_line_preds']
+        return all_cls_scores, all_line_preds

@@ -9,17 +9,25 @@ import torch.nn.functional as F
 
 from fvcore.nn.weight_init import c2_msra_fill, c2_xavier_fill
 
-from mmdet.models.utils.builder import TRANSFORMER
-from mmcv.cnn.bricks.transformer import FFN, build_positional_encoding
-from mmcv.cnn import (build_activation_layer, build_conv_layer,
-                      build_norm_layer, xavier_init, constant_init)
-from mmcv.runner.base_module import BaseModule
-from mmcv.cnn.bricks.transformer import (BaseTransformerLayer,
-                                         TransformerLayerSequence,
-                                         build_transformer_layer_sequence)
-from mmcv.cnn.bricks.registry import (ATTENTION,TRANSFORMER_LAYER,
-                                      TRANSFORMER_LAYER_SEQUENCE)
-from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttnFunction
+#from mmdet.models.utils.builder import TRANSFORMER
+from mmengine.registry import MODELS
+
+from mmcv.cnn.bricks.transformer import FFN #, build_positional_encoding
+
+#from mmcv.cnn import (build_activation_layer, build_conv_layer, build_norm_layer, xavier_init, constant_init)
+from mmengine.model.weight_init import xavier_init, constant_init
+
+#from mmcv.runner.base_module import BaseModule #SPOSTATO IN mmengine.model
+from mmengine.model import BaseModule
+
+from mmcv.cnn.bricks.transformer import (BaseTransformerLayer, TransformerLayerSequence, build_transformer_layer_sequence)
+
+#from mmcv.cnn.bricks.registry import (ATTENTION,TRANSFORMER_LAYER, TRANSFORMER_LAYER_SEQUENCE)
+
+#from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttnFunction
+
+# IMPORT DELL'ATTENTION CUSTOM PER RISOLVERE PROBLEMA COMPATIBILIRÀ ONNX
+from .multi_scale_deformable_attn_pytorch_custom import multi_scale_deformable_attn_pytorch
 
 from .scatter_utils import scatter_mean
 from .utils import inverse_sigmoid
@@ -66,8 +74,7 @@ def ground2img(coords3d, H, W, lidar2img, ori_shape, mask=None, return_img_pts=F
     coords3d = coords3d.clone()
     img_pt = coords3d.flatten(1, 2) @ lidar2img.permute(0, 2, 1)
     img_pt = torch.cat([
-        img_pt[..., :2] / torch.maximum(
-            img_pt[..., 2:3], torch.ones_like(img_pt[..., 2:3]) * 1e-5),
+        img_pt[..., :2] / torch.where(img_pt[..., 2:3] > 1e-5, img_pt[..., 2:3], torch.full_like(img_pt[..., 2:3], 1e-5)),
         img_pt[..., 2:]
     ], dim=-1)
 
@@ -101,7 +108,7 @@ def ground2img(coords3d, H, W, lidar2img, ori_shape, mask=None, return_img_pts=F
     return canvas
 
 
-@ATTENTION.register_module()
+@MODELS.register_module()
 class MSDeformableAttention3D(BaseModule):
     def __init__(self,
                  embed_dims=256,
@@ -128,9 +135,14 @@ class MSDeformableAttention3D(BaseModule):
 
         self.num_query = num_query
         self.num_anchor_per_query = num_anchor_per_query
+        anchor_y_steps = np.linspace(
+            anchor_y_steps['start'],
+            anchor_y_steps['stop'],
+            anchor_y_steps['num']
+        )
         self.register_buffer('anchor_y_steps',
             torch.from_numpy(anchor_y_steps).float())
-        self.num_points_per_anchor = len(anchor_y_steps) // num_anchor_per_query
+        self.num_points_per_anchor = len(self.anchor_y_steps) // num_anchor_per_query
 
         # you'd better set dim_per_head to a power of 2
         # which is more efficient in the CUDA implementation
@@ -233,7 +245,6 @@ class MSDeformableAttention3D(BaseModule):
 
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
-        assert (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == num_value
 
         value = self.value_proj(value)
         if key_padding_mask is not None:
@@ -295,19 +306,14 @@ class MSDeformableAttention3D(BaseModule):
         sampling_locations2d = sampling_locations2d.view(
             bs, num_query, self.num_heads, self.num_levels, num_all_points, xy)
 
-        if torch.cuda.is_available() and value.is_cuda:
-            output = MultiScaleDeformableAttnFunction.apply(
-                value, spatial_shapes, level_start_index, sampling_locations2d,
-                attention_weights, self.im2col_step)
-        else:
-            output = multi_scale_deformable_attn_pytorch(
-                value, spatial_shapes, sampling_locations2d, attention_weights)
+        output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations2d, attention_weights)
+        
         if not self.batch_first:
             output = output.permute(1, 0, 2)
         return output
 
 
-@TRANSFORMER_LAYER.register_module()
+@MODELS.register_module()
 class LATRDecoderLayer(BaseTransformerLayer):
     def __init__(self,
                  attn_cfgs,
@@ -346,7 +352,7 @@ class LATRDecoderLayer(BaseTransformerLayer):
         return query
 
 
-@TRANSFORMER_LAYER_SEQUENCE.register_module()
+@MODELS.register_module()
 class LATRTransformerDecoder(TransformerLayerSequence):
     def __init__(self,
                  *args, embed_dims=None,
@@ -359,15 +365,21 @@ class LATRTransformerDecoder(TransformerLayerSequence):
                  **kwargs):
         super(LATRTransformerDecoder, self).__init__(*args, **kwargs)
         if post_norm_cfg is not None:
-            self.post_norm = build_norm_layer(post_norm_cfg,
-                                              self.embed_dims)[1]
+            self.post_norm = MODELS.build(
+                post_norm_cfg, 
+                default_args=dict(normalized_shape=self.embed_dims)
+            )
         else:
             self.post_norm = None
 
         self.num_query = num_query
         self.num_anchor_per_query = num_anchor_per_query
-        self.anchor_y_steps = anchor_y_steps
-        self.num_points_per_anchor = len(anchor_y_steps) // num_anchor_per_query
+        self.anchor_y_steps = np.linspace(
+            anchor_y_steps['start'],
+            anchor_y_steps['stop'],
+            anchor_y_steps['num']
+        )
+        self.num_points_per_anchor = len(self.anchor_y_steps) // num_anchor_per_query
 
         self.embed_dims = embed_dims
         self.gflat_pred_layer = nn.Sequential(
@@ -477,7 +489,7 @@ class LATRTransformerDecoder(TransformerLayerSequence):
             # update M
             if layer_idx < len(self.layers) - 1:
                 input_feat = torch.cat([img_feats[0], coords_img], dim=1)
-                M = M.detach() @ self.pred2M(self.gflat_pred_layer(input_feat).squeeze(-1).squeeze(-1))
+                M = M.detach() @ self.pred2M(self.gflat_pred_layer(input_feat).flatten(2, 3))
                 ref_3d_homo = (init_ref_3d_homo.flatten(1, 2) @ M.permute(0, 2, 1)
                               ).view(*ref_3d_homo.shape)
 
@@ -521,7 +533,7 @@ class LATRTransformerDecoder(TransformerLayerSequence):
         return torch.stack(intermediate), project_results, outputs_classes, outputs_coords
 
 
-@TRANSFORMER.register_module()
+@MODELS.register_module()
 class LATRTransformer(BaseModule):
     def __init__(self, encoder=None, decoder=None, init_cfg=None):
         super(LATRTransformer, self).__init__(init_cfg=init_cfg)

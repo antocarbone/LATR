@@ -88,7 +88,7 @@ class LaneDataset(Dataset):
         
         self.x_min, self.x_max = self.top_view_region[0, 0], self.top_view_region[1, 0]
         self.y_min, self.y_max = self.top_view_region[2, 1], self.top_view_region[0, 1]
-        
+
         self.anchor_y_steps = args.anchor_y_steps
         self.num_y_steps = len(self.anchor_y_steps)
 

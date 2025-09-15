@@ -8,17 +8,22 @@ from torch.nn import init
 import torch.nn.functional as F
 from torch.nn.init import normal_
 
-from mmcv.cnn import bias_init_with_prob
-from mmdet.models.builder import build_loss
-from mmdet.models.utils import build_transformer
-from mmdet.core import multi_apply
+#from mmcv.cnn import bias_init_with_prob #SPOSTATO IN  mmengine.model
+from mmengine.model import bias_init_with_prob
+#from mmdet.models.builder import build_loss
+#from mmdet.models.utils import build_transformer
+#from mmdet.core import multi_apply
 
-from mmcv.utils import Config
+#from mmcv.utils import Config
+from mmengine.config import Config
 from models.sparse_ins import SparseInsDecoder
 from .utils import inverse_sigmoid
 from .transformer_bricks import *
 
+from mmengine.registry import MODELS
+from mmdet.registry import MODELS as MMDET_MODELS
 
+@MODELS.register_module()
 class LATRHead(nn.Module):
     def __init__(self, args,
                  dim=128,
@@ -106,8 +111,8 @@ class LATRHead(nn.Module):
         self.project_loss_weight = project_loss_weight
 
         loss_reg['reduction'] = 'none'
-        self.reg_crit = build_loss(loss_reg)
-        self.cls_crit = build_loss(loss_cls)
+        self.reg_crit = MMDET_MODELS.build(loss_reg)
+        self.cls_crit = MMDET_MODELS.build(loss_cls)
         self.bce_loss = build_nn_loss(loss_vis)
         self.sparse_ins = SparseInsDecoder(cfg=sparse_ins_decoder)
 
@@ -120,13 +125,13 @@ class LATRHead(nn.Module):
             nn.ReLU(),
             nn.Conv2d(self.embed_dims*4, self.embed_dims, kernel_size=1, stride=1, padding=0),
         )
-        self.positional_encoding = build_positional_encoding(positional_encoding)
+        self.positional_encoding = MMDET_MODELS.build(positional_encoding)
         self.position_encoder = nn.Sequential(
             nn.Conv2d(self.position_dim, self.embed_dims*4, kernel_size=1, stride=1, padding=0),
             nn.ReLU(),
             nn.Conv2d(self.embed_dims*4, self.embed_dims, kernel_size=1, stride=1, padding=0),
         )
-        self.transformer = build_transformer(transformer)
+        self.transformer = MODELS.build(transformer)
         self.query_embedding = nn.Sequential(
             nn.Linear(self.embed_dims, self.embed_dims),
             nn.ReLU(),
@@ -183,18 +188,15 @@ class LATRHead(nn.Module):
                 nn.init.constant_(m[-1].bias, bias_init)
         normal_(self.level_embeds)
 
-    def forward(self, input_dict, is_training=True):
+    def forward(self, neck_out, image, lidar2img, pad_shape):
         output_dict = {}
-        img_feats = input_dict['x']
+        img_feats = neck_out
 
         if not isinstance(img_feats, (list, tuple)):
             img_feats = [img_feats]
 
-        sparse_output = self.sparse_ins(
-            img_feats[0],
-            lane_idx_map=input_dict['lane_idx'],
-            input_shape=input_dict['seg'].shape[-2:],
-            is_training=is_training)
+        #sparse_output = self.sparse_ins(img_feats[0], lane_idx_map=lane_idx, input_shape=seg.shape[-2:])
+        sparse_output = self.sparse_ins(img_feats[0])
         # generate 2d pos emb
         B, C, H, W = img_feats[0].shape
         masks = img_feats[0].new_zeros((B, H, W))
@@ -262,15 +264,15 @@ class LATRHead(nn.Module):
                 reg_branches=self.reg_branches,
                 cls_branches=self.cls_branches,
                 img_feats=img_feats,
-                lidar2img=input_dict['lidar2img'],
-                pad_shape=input_dict['pad_shape'],
+                lidar2img=lidar2img,
+                pad_shape=pad_shape,
                 sin_embed=sin_embed,
                 spatial_shapes=spatial_shapes,
                 level_start_index=level_start_index,
                 mlvl_masks=mlvl_masks,
                 mlvl_positional_encodings=mlvl_positional_encodings,
                 pos_embed2d=pos_embed2d,
-                image=input_dict['image'],
+                image=image,
                 **self.trans_params)
 
         all_cls_scores = torch.stack(outputs_classes)
@@ -294,15 +296,7 @@ class LATRHead(nn.Module):
             'all_line_preds': all_line_preds,
         })
         output_dict.update(sparse_output)
-
-        if is_training:
-            losses = self.get_loss(output_dict, input_dict)
-            project_loss = self.get_project_loss(
-                project_results, input_dict,
-                h=self.gt_project_h, w=self.gt_project_w)
-            losses['project_loss'] = \
-                self.project_loss_weight * project_loss
-            output_dict.update(losses)
+        
         return output_dict
 
     def get_project_loss(self, results, input_dict, h=20, w=30):
@@ -452,3 +446,24 @@ class LATRHead(nn.Module):
 def build_nn_loss(loss_cfg):
     crit_t = loss_cfg.pop('type')
     return getattr(nn, crit_t)(**loss_cfg)
+
+def multi_apply(func, *args, **kwargs):
+    """Apply function to a list of arguments.
+
+    Note:
+        This function applies the ``func`` to multiple inputs and
+        map the multiple outputs of the ``func`` into different
+        list. Each list contains the same type of outputs corresponding
+        to different inputs.
+
+    Args:
+        func (Function): A function that will be applied to a list of
+            arguments
+
+    Returns:
+        tuple(list): A tuple containing multiple list, each list contains \
+            a kind of returned results by the function
+    """
+    pfunc = partial(func, **kwargs) if kwargs else func
+    map_results = map(pfunc, *args)
+    return tuple(map(list, zip(*map_results)))

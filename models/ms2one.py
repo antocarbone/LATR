@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 from mmcv.cnn import ConvModule
-from mmseg.ops import resize
+#from mmseg.ops import resize #UNUSED
 
 
 def build_ms2one(config):

@@ -86,23 +86,20 @@ class InstanceBranch(nn.Module):
         init.constant_(self.mask_kernel.bias, 0.0)
         c2_xavier_fill(self.fc)
 
-    def forward(self, seg_features, is_training=True):
+    def forward(self, seg_features):
         out = {}
         # SparseInst part
         seg_features = self.inst_convs(seg_features)
         # predict instance activation maps
-        iam = self.iam_conv(seg_features.tile(
+        iam = self.iam_conv(seg_features.repeat(
             (1, self.num_group, 1, 1)))
-        if not is_training:
-            iam = iam.view(
-                iam.shape[0],
-                self.num_group,
-                self.num_mask * self.sparse_num_group,
-                *iam.shape[-2:])
-            iam = iam[:, 0, ...]
-            num_group = 1
-        else:
-            num_group = self.num_group
+        iam = iam.view(
+            iam.shape[0],
+            self.num_group,
+            self.num_mask * self.sparse_num_group,
+            *iam.shape[-2:])
+        iam = iam[:, 0, ...]
+        num_group = 1
 
         iam_prob = iam.sigmoid()
         B, N = iam_prob.shape[:2]
@@ -141,14 +138,14 @@ class InstanceBranch(nn.Module):
             iam_prob=iam_prob,
             inst_features=inst_features))
 
-        if self.training:
+        '''if self.training:
             pred_logits = self.cls_score(inst_features)
             pred_kernel = self.mask_kernel(inst_features)
             pred_scores = self.objectness(inst_features)
             out.update(dict(
                 pred_logits=pred_logits,
                 pred_kernel=pred_kernel,
-                pred_scores=pred_scores))
+                pred_scores=pred_scores))'''
         return out
 
 class SparseInsDecoder(nn.Module):
@@ -182,29 +179,15 @@ class SparseInsDecoder(nn.Module):
         locations = torch.cat([x_loc, y_loc], 1)
         return locations.to(x)
 
-    def forward(self, features, is_training=True, **kwargs):
+    def forward(self, features, **kwargs):
         output = {}
         coord_features = self.compute_coordinates(features)
         features = torch.cat([coord_features, features], dim=1)
-        inst_output = self.inst_branch(
-            features, is_training=is_training)
+        inst_output = self.inst_branch(features)
         output.update(inst_output)
-
-        if is_training:
-            mask_features = self.mask_branch(features)
-            pred_kernel = inst_output['pred_kernel']
-            N = pred_kernel.shape[1]
-            B, C, H, W = mask_features.shape
-
-            pred_masks = torch.bmm(pred_kernel, mask_features.view(
-            B, C, H * W)).view(B, N, H, W)
-            pred_masks = F.interpolate(
-                pred_masks, scale_factor=self.scale_factor,
-                mode='bilinear', align_corners=False)
-            output.update(dict(
-                pred_masks=pred_masks))
         
-        if self.training:
+        # TOLTO PERCHÈ NON SERVE IN INFERENZA
+        '''if self.training:
             sparse_inst_losses, matched_indices = self.loss(
                     output,
                     lane_idx_map=kwargs.get('lane_idx_map'),
@@ -213,7 +196,7 @@ class SparseInsDecoder(nn.Module):
             for k, v in sparse_inst_losses.items():
                 sparse_inst_losses[k] = self.sparse_decoder_weight * v
             output.update(sparse_inst_losses)
-            output['matched_indices'] = matched_indices
+            output['matched_indices'] = matched_indices'''
         return output
 
     def loss(self, output, lane_idx_map, input_shape):

@@ -64,6 +64,7 @@ class LaneEval:
             pred_segment_path = os.path.join(pred_root_path, segment)
 
             if not os.path.exists(pred_segment_path):
+                print(f'Warning: {pred_segment_path} does not exist!')
                 assert False
                 print('%s Missed from pred' % segment)
                 continue
@@ -108,7 +109,7 @@ class LaneEval:
             file_lines = [line for line in file]
             if len(file_lines) != 0:
                 config = json.loads(file_lines[0])
-        # config = json.loads(config_path)
+        #config = json.loads(config_path)
         process_num = config['process_num']
         score_l = int(config["score_l"] * 100)
         score_h = int(config["score_h"] * 100)
@@ -140,7 +141,7 @@ class LaneEval:
         for p in process_list:
             p.join()
 
-        torch.distributed.barrier()
+        #torch.distributed.barrier()
 
         gt_all = np.zeros((score_num,), dtype=np.float32)
         pr_all = np.zeros((score_num,), dtype=np.float32)
