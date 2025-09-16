@@ -111,7 +111,8 @@ def parse_model_output(output_dict, cfg, score_threshold=0.3):
     all_cls_scores = torch.from_numpy(output_dict["all_cls_scores"])
     all_line_preds = torch.from_numpy(output_dict["all_line_preds"])
     line_preds = all_line_preds[-1].cpu().numpy()
-    cls_scores = all_cls_scores[-1].softmax(-1).cpu().numpy()
+
+    cls_scores = all_cls_scores[-1]
 
     cam_pitch = 0.3/180*np.pi
     cam_height = 1.5
@@ -125,32 +126,57 @@ def parse_model_output(output_dict, cfg, score_threshold=0.3):
     cam_extrinsics[:3,:3] = np.matmul(cam_extrinsics[:3,:3], R_gc)
     cam_extrinsics[0:2,3]=0.0
 
-    batch_results=[]
+    batch_results = []
     for b_idx in range(line_preds.shape[0]):
-        pred_lanes=[]
-        for lane_idx in range(line_preds.shape[1]):
-            lane_cls_scores=cls_scores[b_idx,lane_idx]
-            pred_class=np.argmax(lane_cls_scores)
-            max_score=np.max(lane_cls_scores)
-            if pred_class==0 or max_score<score_threshold:
-                continue
-            lane_pred=line_preds[b_idx,lane_idx]
-            xs=lane_pred[0:cfg.num_y_steps]
-            zs=lane_pred[cfg.num_y_steps:2*cfg.num_y_steps]
-            vis=lane_pred[2*cfg.num_y_steps:3*cfg.num_y_steps]
+        pred_lanes = []
+        cls_pred = torch.argmax(cls_scores[b_idx], dim=-1).cpu().numpy()
+        pos_lanes = line_preds[b_idx][cls_pred > 0]
+        
+        if pos_lanes.shape[0]:
+            if cfg.num_category > 1:
+                scores_pred = torch.softmax(cls_scores[b_idx][cls_pred > 0], dim=-1).cpu().numpy()
+            else:
+                scores_pred = torch.sigmoid(cls_scores[b_idx][cls_pred > 0]).cpu().numpy()
 
-            lane=[]
-            for x,y,z,v in zip(xs,cfg.anchor_y_steps,zs,vis):
-                if v>0.5:
-                    lane.append([float(x), float(y), float(z)])
-            if len(lane)>=2:
-                lane=np.array(lane)
-                lane=np.flip(lane, axis=0)
-                lane=np.vstack((lane.T, np.ones((1,lane.shape[0]))))
-                lane=np.matmul(np.linalg.inv(cam_extrinsics), lane)
-                lane=lane[:3,:].T
-                pred_lanes.append({"points":lane.tolist(),"score":float(max_score)})
-        batch_results.append({"lanes":pred_lanes})
+            xs = pos_lanes[:, 0:cfg.num_y_steps]
+            ys = np.tile(cfg.anchor_y_steps.copy()[None, :], (xs.shape[0], 1))
+            zs = pos_lanes[:, cfg.num_y_steps:2*cfg.num_y_steps]
+            vis = pos_lanes[:, 2*cfg.num_y_steps:]
+            
+            for tmp_idx in range(pos_lanes.shape[0]):
+                cur_vis = vis[tmp_idx] > 0
+                cur_xs = xs[tmp_idx][cur_vis]
+                cur_ys = ys[tmp_idx][cur_vis]
+                cur_zs = zs[tmp_idx][cur_vis]
+
+                if cur_vis.sum() < 2:
+                    continue
+
+                if cfg.num_category > 1:
+                    max_score = np.max(scores_pred[tmp_idx])
+                else:
+                    max_score = scores_pred[tmp_idx][0]
+                    
+                if max_score < score_threshold:
+                    continue
+
+                lane = []
+                for tmp_inner_idx in range(cur_xs.shape[0]):
+                    lane.append([cur_xs[tmp_inner_idx], 
+                                cur_ys[tmp_inner_idx], 
+                                cur_zs[tmp_inner_idx]])
+                
+                if len(lane) >= 2:
+                    lane = np.array(lane)
+                    lane = np.flip(lane, axis=0)
+                    lane = np.vstack((lane.T, np.ones((1, lane.shape[0]))))
+                    lane = np.matmul(np.linalg.inv(cam_extrinsics), lane)
+                    lane = lane[:3, :].T
+                    
+                    pred_lanes.append({"points": lane.tolist(), "score": float(max_score)})
+        
+        batch_results.append({"lanes": pred_lanes})
+    
     return batch_results
 
 def save_predictions(predictions, sample_info, pred_dir):
@@ -213,7 +239,7 @@ def plot_and_overlay(predictions, dataset, sample_info, pred_dir, cfg):
         points_original = cam_extrinsics @ points_h
         proj = lidar2img @ points_original
         
-        valid_mask = proj[2, :] > 0.1
+        valid_mask = proj[2, :] > 1e-5
         if not np.any(valid_mask):
             continue
             
