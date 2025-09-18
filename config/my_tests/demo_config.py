@@ -39,10 +39,10 @@ position_range = [
     -5,
     top_view_region[1][0] + enlarge_length,
     top_view_region[0][1] + enlarge_length,
-    5.]
+    5.
+]
 
 anchor_y_steps = dict(type='linspace', start=0.5, stop=65, num=num_pt_per_line)
-anchor_y_steps_dense = dict(type='linspace', start=0.5, stop=65, num=num_pt_per_line*10)
 num_y_steps = num_pt_per_line
 
 _dim_ = 256
@@ -161,9 +161,8 @@ sparse_ins_decoder=Config(
 
 resize_h = 720
 resize_w = 960
-org_h = 1020
-org_w = 1920
-crop_y = 100
+#org_h = 1020
+#org_w = 1920
 nepochs = 24
 eval_freq = 8
 
@@ -193,17 +192,7 @@ model = dict(
             top_view_region=top_view_region,
             batch_size=batch_size,
             anchor_y_steps=anchor_y_steps,
-            anchor_y_steps_dense=anchor_y_steps_dense,
             no_cuda=False
         )
-    ),
-    data_preprocessor=dict(
-        type='DetDataPreprocessor',
-        mean=mean,
-        std=std,
-        bgr_to_rgb=False
-    ),
-    test_cfg=dict()
+    )
 )
-
-test_pipeline = [dict(type='PackDetInputs')]

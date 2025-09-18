@@ -12,6 +12,7 @@ import argparse
 from PIL import Image
 import torchvision.transforms.functional as F
 from torchvision.transforms import InterpolationMode
+from torch.utils.data import DataLoader
 
 import random
 import matplotlib.pyplot as plt
@@ -20,10 +21,7 @@ import cv2
 def load_model_checkpoint(model, checkpoint_path, device):
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location=device)
-        if 'state_dict' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'], strict=False)
-        else:
-            model.load_state_dict(checkpoint, strict=False)
+        model.load_state_dict(checkpoint['state_dict'])
     return model
 
 def preprocess_for_inference(batch_data, device, precision="fp32"):
@@ -32,7 +30,7 @@ def preprocess_for_inference(batch_data, device, precision="fp32"):
     pad_shape = batch_data["pad_shape"].contiguous().float().to(device)
     return images, lidar2img, pad_shape
 
-def parse_model_output(output, cfg, score_threshold=0.3):
+def parse_model_output(output, cfg):
     all_cls_scores, all_line_preds = output
     line_preds = all_line_preds[-1].cpu().numpy()
     cls_scores = all_cls_scores[-1]
@@ -75,13 +73,7 @@ def parse_model_output(output, cfg, score_threshold=0.3):
                 if cur_vis.sum() < 2:
                     continue
 
-                if cfg.num_category > 1:
-                    max_score = np.max(scores_pred[tmp_idx])
-                else:
-                    max_score = scores_pred[tmp_idx][0]
-                    
-                if max_score < score_threshold:
-                    continue
+                max_score = np.max(scores_pred[tmp_idx])
 
                 lane = []
                 for tmp_inner_idx in range(cur_xs.shape[0]):
@@ -116,19 +108,20 @@ def save_predictions(predictions, sample_info, pred_dir):
         with open(full_json_path, "w") as f:
             json.dump(pred, f, indent=2)
 
-def overlay_predictions(pred_data, dataset, sample_idx, cfg, pred_dir):
-    overlay_dir = os.path.join(pred_dir, "overlays")
-    os.makedirs(overlay_dir, exist_ok=True)
-
+def overlay_predictions(pred_data, dataset, sample_idx, cfg, overlay_dir):
     sample_json = dataset._label_list[sample_idx]
     img_path = sample_json.replace(".json", ".jpg").replace("val", "data")
+
+    if not os.path.exists(img_path):
+        print(f"Immagine non trovata: {img_path}")
+        return
+    
     img_pil = Image.open(img_path).convert('RGB')
     h_crop = getattr(cfg, 'crop_y', 0)
-    h_org = getattr(cfg, 'org_h', img_pil.height)
-    w_org = getattr(cfg, 'org_w', img_pil.width)
+    h_org = img_pil.height
+    w_org = img_pil.width
     img_cropped = F.crop(img_pil, h_crop, 0, h_org-h_crop, w_org)
-    img_resized = F.resize(img_cropped, size=(cfg.resize_h, cfg.resize_w),
-                           interpolation=InterpolationMode.BILINEAR)
+    img_resized = F.resize(img_cropped, size=(cfg.resize_h, cfg.resize_w), interpolation=InterpolationMode.BILINEAR)
     img = cv2.cvtColor(np.array(img_resized), cv2.COLOR_RGB2BGR)
     h, w = img.shape[:2]
 
@@ -145,9 +138,6 @@ def overlay_predictions(pred_data, dataset, sample_idx, cfg, pred_dir):
     cam_extrinsics[0:2,3] = 0.0
 
     lidar2img = dataset[sample_idx]["lidar2img"]
-    
-    points_drawn = 0
-    points_outside = 0
     
     for lane_idx, lane in enumerate(pred_data["lanes"]):
         points_after_inv = np.array(lane["points"])
@@ -175,30 +165,66 @@ def overlay_predictions(pred_data, dataset, sample_idx, cfg, pred_dir):
                     color = colors[lane_idx % len(colors)]
                     cv2.line(img, (x1, y1), (x2, y2), color, 3)
     
-    out_img = os.path.join(overlay_dir, f"prediction_{sample_idx:06d}.jpg")
+    json_path_parts = sample_json.split(os.sep)
+    scene_id = json_path_parts[-3] if len(json_path_parts)>=3 else "scene_000000"
+    cam_id = json_path_parts[-2] if len(json_path_parts)>=3 else "cam01"
+    frame_name = os.path.basename(sample_json).replace(".json", ".jpg")
+
+    save_dir = os.path.join(overlay_dir, scene_id, cam_id)
+    os.makedirs(save_dir, exist_ok=True)
+    
+    out_img = os.path.join(save_dir, frame_name)
     cv2.imwrite(out_img, img)
-    print(f"Overlay salvato: {out_img}")
+
+def create_all_overlays(pred_dir, dataset, cfg):
+    overlay_dir = os.path.join(pred_dir, "overlays")
+    os.makedirs(overlay_dir, exist_ok=True)
+    
+    print("Creazione overlay per tutte le predizioni...")
+    overlay_count = 0
+
+    for sample_idx in tqdm(range(len(dataset)), desc="Creando overlay"):
+        sample_json = dataset._label_list[sample_idx]
+        json_path_parts = sample_json.split(os.sep)
+        scene_id = json_path_parts[-3] if len(json_path_parts)>=3 else "scene_000000"
+        cam_id = json_path_parts[-2] if len(json_path_parts)>=3 else "cam01"
+        frame_name = os.path.basename(sample_json)
+        
+        pred_path = os.path.join(pred_dir, scene_id, cam_id, frame_name)
+
+        if os.path.exists(pred_path):
+            try:
+                with open(pred_path, "r") as f:
+                    pred_data = json.load(f)
+                
+                overlay_predictions(pred_data, dataset, sample_idx, cfg, overlay_dir)
+                overlay_count += 1
+            except Exception as e:
+                print(f"Errore durante la creazione dell'overlay per {pred_path}: {e}")
+    
+    print(f"Overlay creati: {overlay_count}")
+    return overlay_count
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="./config/my_tests/demo_config.py")
     parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--score_threshold", type=float, default=0.3)
     parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--skip_overlays", action="store_true", help="Salta la creazione degli overlay")
     args = parser.parse_args()
 
     cfg = Config.fromfile(args.config)
     if isinstance(cfg.top_view_region, list):
         cfg.top_view_region = np.array(cfg.top_view_region)
+    cfg.anchor_y_steps = np.linspace(cfg.anchor_y_steps['start'], cfg.anchor_y_steps['stop'], cfg.anchor_y_steps['num'])
+    
+    dataset = LaneDataset(cfg.dataset_dir, cfg.data_dir, cfg, data_aug=False)
+    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = LATR(cfg)
     model = load_model_checkpoint(model, args.checkpoint, device)
     model = model.to(device).eval()
-
-    dataset = LaneDataset(cfg.dataset_dir, cfg.data_dir, cfg, data_aug=False)
-    from torch.utils.data import DataLoader
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=8, pin_memory=True)
 
     pred_dir = "./work_dirs/test_predictions"
     os.makedirs(pred_dir, exist_ok=True)
@@ -208,11 +234,12 @@ def main():
     start_time = time.time()
     all_sample_info = []
 
+    print("Esecuzione inferenza e salvataggio predizioni...")
     with torch.no_grad():
-        for batch_idx, batch_data in enumerate(tqdm(dataloader)):
+        for batch_idx, batch_data in enumerate(tqdm(dataloader, desc="Inferenza")):
             images, lidar2img, pad_shape = preprocess_for_inference(batch_data, device)
             output = model(images, lidar2img, pad_shape)
-            batch_predictions = parse_model_output(output, cfg, args.score_threshold)
+            batch_predictions = parse_model_output(output, cfg)
 
             batch_sample_info = [{"idx_json_file": dataset._label_list[batch_idx*args.batch_size + i]}
                                  for i in range(len(batch_predictions))]
@@ -223,23 +250,16 @@ def main():
     fps = len(all_sample_info)/total_time
     print(f"FPS medio: {fps:.2f}")
 
-    if len(all_sample_info) > 0:
-        sample_idx = random.randint(0, len(all_sample_info)-1)
-        sample_json = all_sample_info[sample_idx]["idx_json_file"]
-        json_path_parts = sample_json.split(os.sep)
-        scene_id = json_path_parts[-3] if len(json_path_parts)>=3 else "scene_000000"
-        cam_id = json_path_parts[-2] if len(json_path_parts)>=3 else "cam01"
-        frame_name = os.path.basename(sample_json)
-        pred_path = os.path.join(pred_dir, scene_id, cam_id, frame_name)
+    if not args.skip_overlays:
+        overlay_count = create_all_overlays(pred_dir, dataset, cfg)
+        print(f"Creati {overlay_count} overlay in totale")
+    else:
+        print("Creazione overlay saltata (--skip_overlays)")
 
-        with open(pred_path, "r") as f:
-            pred_data = json.load(f)
-
-        overlay_predictions(pred_data, dataset, sample_idx, cfg, pred_dir)
-
+    print("Avvio valutazione...")
     eval_config_path = "./config/_base_/once_eval_config.json"
-    dummy_args = type("DummyArgs", (), {"proc_id":0})()
-    metrics = evaluator.lane_evaluation(cfg.data_dir, pred_dir, eval_config_path, dummy_args)
+    cfg.proc_id = 0
+    metrics = evaluator.lane_evaluation(cfg.data_dir, pred_dir, eval_config_path, args=cfg)
     print("Valutazione completata!")
 
 if __name__ == "__main__":

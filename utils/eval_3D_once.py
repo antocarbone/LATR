@@ -326,7 +326,6 @@ class LaneEvalOneFile:
                     tp += 1
         return tp, distance_error
 
-
 def parse_config():
     parser = argparse.ArgumentParser(description='arg parser')
     parser.add_argument('--cfg_file', type=str, default='/home/dingzihan/PersFormer_3DLane/config/once_eval_config.json', help='specify the config for evaluation')

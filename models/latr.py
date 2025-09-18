@@ -15,7 +15,7 @@ from mmdet.registry import MODELS as MMDET_MODELS
 # overall network
 @MODELS.register_module()
 class LATR(nn.Module):
-    def __init__(self, args, data_preprocessor = None, backbone=None, decode_head=None, test_cfg=None):
+    def __init__(self, args):
         super().__init__()
         self.no_cuda = args.no_cuda
         self.batch_size = args.batch_size
@@ -28,16 +28,11 @@ class LATR(nn.Module):
         num_group = args.latr_cfg.num_group
         sparse_num_group = args.latr_cfg.sparse_num_group
         
-        args.anchor_y_steps = np.linspace(
+        '''args.anchor_y_steps = np.linspace(
             args.anchor_y_steps['start'],
             args.anchor_y_steps['stop'],
             args.anchor_y_steps['num']
-        )
-        args.anchor_y_steps_dense = np.linspace(
-            args.anchor_y_steps_dense['start'],
-            args.anchor_y_steps_dense['stop'],
-            args.anchor_y_steps_dense['num']
-        )
+        )'''
 
         self.encoder = MMDET_MODELS.build(args.latr_cfg.encoder)
         if getattr(args.latr_cfg, 'neck', None):
@@ -69,8 +64,7 @@ class LATR(nn.Module):
             **args.latr_cfg.get('head', {}),
             trans_params=args.latr_cfg.get('trans_params', {})
         )
-        
-    #=== original forward function ===#
+
     def forward(self, image, lidar2img, pad_shape):
         out_featList = self.encoder(image)
         neck_out = self.neck(out_featList)
