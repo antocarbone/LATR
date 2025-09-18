@@ -50,13 +50,13 @@ torch.onnx.export(
 )
 print(f"ONNX esportato in {ONNX_FILE} (float32, dimensioni fisse)")
 
-# ---------------- CONVERTI A FLOAT16 ----------------
+# ---------------- FLOAT16 CONVERSION ----------------
 onnx_model = onnx.load(ONNX_FILE)
 onnx_model_fp16 = float16.convert_float_to_float16(onnx_model)
 onnx.save(onnx_model_fp16, ONNX_FILE)
 print(f"ONNX convertito in float16: {ONNX_FILE}")
 
-# ---------------- CARICA PLUGIN TRT ----------------
+# ---------------- TRT PLUGIN LOAD ----------------
 PLUGIN_PATH = 'mmdeploy/build/lib/libmmdeploy_tensorrt_ops.so'
 if not os.path.exists(PLUGIN_PATH):
     raise FileNotFoundError(f"Plugin TensorRT non trovato in {PLUGIN_PATH}")
@@ -64,7 +64,7 @@ import ctypes
 ctypes.CDLL(PLUGIN_PATH)
 print(f"Plugin TensorRT caricato da {PLUGIN_PATH}")
 
-# ---------------- CREAZIONE ENGINE TensorRT ----------------
+# ---------------- TRT ENGINE PRODUCITON ----------------
 from mmdeploy.backend.tensorrt.onnx2tensorrt import onnx2tensorrt
 
 onnx2tensorrt(
