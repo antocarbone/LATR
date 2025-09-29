@@ -1,2 +1,10 @@
 *pyc
 *pth
+car_imgs/
+work_dirs/
+rosbag_lane_results/
+frame_2_video.py
+mivia_bag_to_json_data.py
+plot_lanes.py
+eval_miviacar_tensorrt.py
+*mp4

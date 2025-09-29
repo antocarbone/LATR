@@ -47,7 +47,6 @@ num_y_steps = num_pt_per_line
 
 _dim_ = 256
 num_query = 12
-num_pt_per_line = 20
 latr_cfg = dict(
     fpn_dim = _dim_,
     num_query = num_query,
@@ -161,8 +160,6 @@ sparse_ins_decoder=Config(
 
 resize_h = 720
 resize_w = 960
-#org_h = 1020
-#org_w = 1920
 nepochs = 24
 eval_freq = 8
 

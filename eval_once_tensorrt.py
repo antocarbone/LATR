@@ -13,88 +13,11 @@ from utils.eval_3D_once import LaneEval
 import random
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import cv2
+import cv2  
 from PIL import Image
 import torchvision.transforms.functional as F
 from torchvision.transforms import InterpolationMode
-
-try:
-    import tensorrt as trt
-    import pycuda.driver as cuda
-    import pycuda.autoinit
-    TRT_AVAILABLE = True
-except ImportError:
-    TRT_AVAILABLE = False
-    print("Errore: TensorRT e PyCUDA non disponibili.")
-    exit()
-
-class TensorRTInference:
-    def __init__(self, engine_path, plugin_path=None):
-        if not TRT_AVAILABLE:
-            raise ImportError("TensorRT non disponibile")
-        self.engine_path = engine_path
-        self.plugin_path = plugin_path or "mmdeploy/build/lib/libmmdeploy_tensorrt_ops.so"
-        cuda.init()
-        self.device = cuda.Device(0)
-        self.context = self.device.make_context()
-        if os.path.exists(self.plugin_path):
-            self.plugin_lib = ctypes.CDLL(self.plugin_path)
-        self.engine = self._load_engine()
-        self.context_exec = self.engine.create_execution_context()
-        self.buffers = self._allocate_buffers()
-
-    def _load_engine(self):
-        TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-        with open(self.engine_path, "rb") as f, trt.Runtime(TRT_LOGGER) as runtime:
-            engine = runtime.deserialize_cuda_engine(f.read())
-            if engine is None:
-                raise RuntimeError(f"Impossibile deserializzare: {self.engine_path}")
-            return engine
-
-    def _allocate_buffers(self):
-        inputs, outputs, bindings = [], [], []
-        stream = cuda.Stream()
-        for i in range(self.engine.num_io_tensors):
-            name = self.engine.get_tensor_name(i)
-            tensor_mode = self.engine.get_tensor_mode(name)
-            size = trt.volume(self.engine.get_tensor_shape(name))
-            dtype = trt.nptype(self.engine.get_tensor_dtype(name))
-            host_mem = cuda.pagelocked_empty(size, dtype)
-            device_mem = cuda.mem_alloc(host_mem.nbytes)
-            bindings.append(int(device_mem))
-            if tensor_mode == trt.TensorIOMode.INPUT:
-                inputs.append({'host': host_mem, 'device': device_mem, 'name': name})
-            else:
-                outputs.append({'host': host_mem, 'device': device_mem, 'name': name})
-        return {'inputs': inputs, 'outputs': outputs, 'bindings': bindings, 'stream': stream}
-
-    def infer(self, images, lidar2img, pad_shape):
-        stream = self.buffers['stream']
-        inputs_list = [images, lidar2img, pad_shape]
-        for i, input_buffer in enumerate(self.buffers['inputs']):
-            np.copyto(input_buffer['host'], inputs_list[i].cpu().numpy().ravel())
-            cuda.memcpy_htod_async(input_buffer['device'], input_buffer['host'], stream)
-        self.context_exec.execute_async_v2(bindings=self.buffers['bindings'], stream_handle=stream.handle)
-        for out_buffer in self.buffers['outputs']:
-            cuda.memcpy_dtoh_async(out_buffer['host'], out_buffer['device'], stream)
-        stream.synchronize()
-        out_dict = {}
-        for out_buffer in self.buffers['outputs']:
-            out_dict[out_buffer['name']] = out_buffer['host'].reshape(self.engine.get_tensor_shape(out_buffer['name']))
-        return out_dict
-
-    def __del__(self):
-        try:
-            if hasattr(self, 'context'):
-                self.context.pop()
-            if hasattr(self, 'context_exec'):
-                del self.context_exec
-            if hasattr(self, 'engine'):
-                del self.engine
-            for buf in self.buffers['inputs']+self.buffers['outputs']:
-                buf['device'].free()
-        except:
-            pass
+from tensorrt_inference import TensorRTInference
 
 def preprocess_for_tensorrt(batch_data, precision="fp32"):
     if precision=="fp16":
@@ -195,8 +118,8 @@ def overlay_predictions(pred_data, dataset, sample_idx, cfg, overlay_dir):
     
     img_pil = Image.open(img_path).convert('RGB')
     h_crop = getattr(cfg, 'crop_y', 0)
-    h_org = img_pil.height
-    w_org = img_pil.width
+    h_org = getattr(cfg, 'org_h', img_pil.height)
+    w_org = getattr(cfg, 'org_w', img_pil.width)
     img_cropped = F.crop(img_pil, h_crop, 0, h_org-h_crop, w_org)
     img_resized = F.resize(img_cropped, size=(cfg.resize_h, cfg.resize_w), interpolation=InterpolationMode.BILINEAR)
     img = cv2.cvtColor(np.array(img_resized), cv2.COLOR_RGB2BGR)
@@ -252,7 +175,6 @@ def overlay_predictions(pred_data, dataset, sample_idx, cfg, overlay_dir):
     cv2.imwrite(out_img, img)
 
 def create_all_overlays(pred_dir, dataset, cfg):
-    """Crea overlay per tutte le predizioni salvate"""
     overlay_dir = os.path.join(pred_dir, "overlays")
     os.makedirs(overlay_dir, exist_ok=True)
     
@@ -298,6 +220,10 @@ def main():
     
     trt_inference=TensorRTInference(args.engine,args.plugin_path)
     dataset=LaneDataset(cfg.dataset_dir,cfg.data_dir,cfg,data_aug=False)
+    _, h, p, ext, intr, _, _, _ = dataset.preprocess_data_from_json_once("data/once/val/000027/cam01/1616100802400.json")
+    print("cam height:", h, "cam pitch:", p)
+    print("cam extrinsics:\n", ext)
+    print("cam intrinsics:\n", intr)
     dataloader=DataLoader(dataset,batch_size=args.batch_size,shuffle=False,num_workers=4,pin_memory=True)
     pred_dir="./work_dirs/tensorrt_test_predictions/"
     os.makedirs(pred_dir,exist_ok=True)
@@ -307,7 +233,7 @@ def main():
 
     print("Esecuzione inferenza TensorRT e salvataggio predizioni...")
     with torch.no_grad():
-        for batch_idx,batch_data in enumerate(tqdm(dataloader, desc="Inferenza TensorRT")):
+        for batch_idx, batch_data in enumerate(tqdm(dataloader, desc="Inferenza TensorRT")):
             images,lidar2img,pad_shape=preprocess_for_tensorrt(batch_data,args.precision)
             output_dict=trt_inference.infer(images,lidar2img,pad_shape)
             batch_predictions=parse_model_output(output_dict,cfg)

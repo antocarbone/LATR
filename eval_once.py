@@ -118,8 +118,8 @@ def overlay_predictions(pred_data, dataset, sample_idx, cfg, overlay_dir):
     
     img_pil = Image.open(img_path).convert('RGB')
     h_crop = getattr(cfg, 'crop_y', 0)
-    h_org = img_pil.height
-    w_org = img_pil.width
+    h_org = getattr(cfg, 'org_h', img_pil.height)
+    w_org = getattr(cfg, 'org_w', img_pil.width)
     img_cropped = F.crop(img_pil, h_crop, 0, h_org-h_crop, w_org)
     img_resized = F.resize(img_cropped, size=(cfg.resize_h, cfg.resize_w), interpolation=InterpolationMode.BILINEAR)
     img = cv2.cvtColor(np.array(img_resized), cv2.COLOR_RGB2BGR)
